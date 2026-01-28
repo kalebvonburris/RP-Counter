@@ -85,11 +85,6 @@
             echo "  2. cargo run --release"
             echo "  3. Pico will restart automatically!"
             echo ""
-            echo "WS2812B dependencies to add:"
-            echo "  #   smart-leds = \"0.3\""
-            echo "  #   ws2812-pio = \"0.7\""
-            echo "  #   rp-pico = \"0.8\""
-            echo ""
           '';
         });
 
