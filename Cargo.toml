@@ -13,6 +13,7 @@ cortex-m-rt = "0.7"
 embedded-hal = "1.0.0"
 smart-leds = "0.4"
 ws2812-pio = "0.9"                                                              # This was the version that worked
+rp2040-flash = "0.6.0"
 
 # cargo build/run
 [profile.dev]
@@ -26,10 +27,9 @@ overflow-checks = true
 # cargo build/run --release
 [profile.release]
 codegen-units = 1
-debug = 2
 debug-assertions = false
 incremental = false
-lto = 'fat'
+lto = true
 opt-level = 3
 overflow-checks = false
 
@@ -42,11 +42,12 @@ opt-level = 0
 overflow-checks = false
 
 [profile.release.build-override]
-codegen-units = 8
+codegen-units = 1
 debug = false
 debug-assertions = false
-opt-level = 0
+opt-level = 3
 overflow-checks = false
+strip = true
 
 # cargo test
 [profile.test]

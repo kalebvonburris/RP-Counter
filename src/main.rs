@@ -15,7 +15,7 @@ use rp2040_hal::{
     watchdog::Watchdog,
 };
 
-use embedded_hal::digital::{InputPin, OutputPin};
+use embedded_hal::digital::OutputPin;
 use smart_leds::SmartLedsWrite;
 use ws2812_pio::Ws2812;
 
@@ -78,6 +78,31 @@ fn IO_IRQ_BANK0() {
     }
 }
 
+const FLASH_COUNTER_OFFSET: u32 = (2 * 1024 * 1024) - 4096;
+const XIP_BASE: u32 = 0x10000000;
+use rp2040_flash::flash;
+
+fn read_counter_from_flash() -> u64 {
+    let flash_addr = (XIP_BASE + FLASH_COUNTER_OFFSET) as *const u64;
+    let value = unsafe { core::ptr::read_volatile(flash_addr) };
+    if value == 0xFFFFFFFFFFFFFFFF {
+        0
+    } else {
+        value
+    }
+}
+
+fn write_counter_to_flash(value: u64) {
+    let mut buffer = [0xFFu8; 4096];
+    buffer[0..8].copy_from_slice(&value.to_le_bytes());
+
+    cortex_m::interrupt::free(|_| {
+        // This macro creates a RAM-resident function automatically!
+        unsafe {
+            flash::flash_range_erase_and_program(FLASH_COUNTER_OFFSET, &buffer, false);
+        }
+    });
+}
 #[entry]
 fn main() -> ! {
     let mut pac = pac::Peripherals::take().unwrap();
@@ -116,7 +141,8 @@ fn main() -> ! {
         timer.count_down(),
     );
 
-    let mut counter: u64 = 0;
+    // READ COUNTER ON BOOT
+    let mut counter: u64 = read_counter_from_flash();
 
     // Setup interrupt button
     let interrupt_pin = pins.gpio3.into_pull_up_input();
@@ -136,12 +162,19 @@ fn main() -> ! {
 
     use smart_leds::RGB8;
 
+    let blank = [RGB8::default(); WIDTH * HEIGHT];
+    let _ = ws.write(blank);
+
     loop {
         // Read button (low when pressed due to pull-up)
         let button_pressed = free(|cs| BUTTON_PRESSED.borrow(cs).replace(false));
 
         if button_pressed && !button_was_pressed {
             counter += 1;
+
+            if counter > 999_999 {
+                counter = 0;
+            }
 
             let leds = logical_array_to_zig_zag(num_to_pixels(counter));
 
@@ -156,7 +189,22 @@ fn main() -> ! {
             .to_secs()
             > 10
         {
-            let blank = [RGB8::default(); WIDTH * HEIGHT];
+            unsafe {
+                BUTTON_PIN.as_mut().unwrap().clear_interrupt(EdgeLow); // Clear any pending
+                BUTTON_PIN
+                    .as_mut()
+                    .unwrap()
+                    .set_interrupt_enabled(EdgeLow, false); // Disable
+            }
+
+            // WRITE COUNTER TO FLASH
+            write_counter_to_flash(counter);
+            unsafe {
+                BUTTON_PIN
+                    .as_mut()
+                    .unwrap()
+                    .set_interrupt_enabled(EdgeLow, true);
+            }
             let _ = ws.write(blank);
 
             loop {
@@ -166,14 +214,20 @@ fn main() -> ! {
 
                 if awoken_by_button {
                     counter += 1;
+
+                    if counter > 999_999 {
+                        counter = 0;
+                    }
+
                     let _ = ws.write(logical_array_to_zig_zag(num_to_pixels(counter)));
                     last_activity = timer.get_counter();
                     delay.delay_ms(100);
+                    button_was_pressed = true;
                     break;
                 }
             }
         }
 
-        delay.delay_ms(80);
+        delay.delay_ms(30);
     }
 }
