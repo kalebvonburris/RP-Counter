@@ -1,5 +1,8 @@
 #![no_std]
 #![no_main]
+// Technically, making a static mutable reference is
+// undefined behavior, but I said I want to, so too bad!
+#![allow(static_mut_refs)]
 
 mod led_logic;
 use led_logic::*;
@@ -15,55 +18,43 @@ use rp2040_hal::{
     watchdog::Watchdog,
 };
 
-use embedded_hal::digital::OutputPin;
-use smart_leds::SmartLedsWrite;
+use rp2040_flash::flash;
+
+use smart_leds::{SmartLedsWrite, RGB8};
 use ws2812_pio::Ws2812;
 
 use core::cell::RefCell;
 use cortex_m::interrupt::{free, Mutex};
 
-/// Bootloader configuration, placed at the correct memory location
+/// Bootloader configuration, placed at the correct memory location.
+/// This is REQUITED for the RP2040 to boot correctly. Otherwise,
+/// we only have the initial bootloader in ROM, which is very limited.
 #[link_section = ".boot2"]
 #[used]
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_GENERIC_03H;
 
+/// Mutex to track button press state.
 static BUTTON_PRESSED: Mutex<RefCell<bool>> = Mutex::new(RefCell::new(false));
+
+/// The actual button pin used in the interrupt handler.
 static mut BUTTON_PIN: Option<Pin<rp2040_hal::gpio::bank0::Gpio3, FunctionSioInput, PullUp>> = None;
 
+/// The frequency of the external crystal oscillator.
 const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 
-// Custom panic handler that blinks GPIO 17
+/// There used to be panic handler code here, but it's unnecessary
+/// as my code would never panic. :)
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    // Try to get GPIO17 working for panic indication
-    if let (Some(mut pac), Some(core)) = (pac::Peripherals::take(), pac::CorePeripherals::take()) {
-        let sio = Sio::new(pac.SIO);
-        let pins = Pins::new(
-            pac.IO_BANK0,
-            pac.PADS_BANK0,
-            sio.gpio_bank0,
-            &mut pac.RESETS,
-        );
-        let mut led = pins.gpio17.into_push_pull_output();
-        let mut delay = cortex_m::delay::Delay::new(core.SYST, 125_000_000); // Default freq
-
-        // Panic pattern: 3 fast blinks, pause, repeat
-        loop {
-            for _ in 0..3 {
-                let _ = led.set_high();
-                delay.delay_ms(100);
-                let _ = led.set_low();
-                delay.delay_ms(100);
-            }
-            delay.delay_ms(1000);
-        }
-    }
-
+fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {
         cortex_m::asm::wfi();
     }
 }
 
+/// Interrupt handler for the button press.
+///
+/// When we press the button during the sleep state,
+/// this interrupt will be triggered, waking the microcontroller.
 #[interrupt]
 fn IO_IRQ_BANK0() {
     free(|cs| {
@@ -78,10 +69,13 @@ fn IO_IRQ_BANK0() {
     }
 }
 
+/// The offset in flash memory where we store the counter.
+/// This is the end of the flash ROM area (2MB) minus a 4KB block.
 const FLASH_COUNTER_OFFSET: u32 = (2 * 1024 * 1024) - 4096;
+/// The XIP memory base address.
 const XIP_BASE: u32 = 0x10000000;
-use rp2040_flash::flash;
 
+/// Reads a `u64` from the last block of flash memory.
 fn read_counter_from_flash() -> u64 {
     let flash_addr = (XIP_BASE + FLASH_COUNTER_OFFSET) as *const u64;
     let value = unsafe { core::ptr::read_volatile(flash_addr) };
@@ -92,17 +86,16 @@ fn read_counter_from_flash() -> u64 {
     }
 }
 
+/// Erases and writes a `u64` value to the last block of flash memory.
 fn write_counter_to_flash(value: u64) {
     let mut buffer = [0xFFu8; 4096];
     buffer[0..8].copy_from_slice(&value.to_le_bytes());
-
-    cortex_m::interrupt::free(|_| {
-        // This macro creates a RAM-resident function automatically!
-        unsafe {
-            flash::flash_range_erase_and_program(FLASH_COUNTER_OFFSET, &buffer, false);
-        }
+    // This stops any interrupts during flash operations
+    cortex_m::interrupt::free(|_| unsafe {
+        flash::flash_range_erase_and_program(FLASH_COUNTER_OFFSET, &buffer, false);
     });
 }
+
 #[entry]
 fn main() -> ! {
     let mut pac = pac::Peripherals::take().unwrap();
@@ -160,8 +153,6 @@ fn main() -> ! {
     // Setup activity timing
     let mut last_activity = timer.get_counter();
 
-    use smart_leds::RGB8;
-
     let blank = [RGB8::default(); WIDTH * HEIGHT];
     let _ = ws.write(blank);
 
@@ -169,6 +160,7 @@ fn main() -> ! {
         // Read button (low when pressed due to pull-up)
         let button_pressed = free(|cs| BUTTON_PRESSED.borrow(cs).replace(false));
 
+        // If we just pressed the button, increment counter and update display
         if button_pressed && !button_was_pressed {
             counter += 1;
 
@@ -185,33 +177,24 @@ fn main() -> ! {
 
         button_was_pressed = button_pressed;
 
+        // Idle condition - more than 10 seconds of inactivity
         if (timer.get_counter().duration_since_epoch() - last_activity.duration_since_epoch())
             .to_secs()
             > 10
         {
-            unsafe {
-                BUTTON_PIN.as_mut().unwrap().clear_interrupt(EdgeLow); // Clear any pending
-                BUTTON_PIN
-                    .as_mut()
-                    .unwrap()
-                    .set_interrupt_enabled(EdgeLow, false); // Disable
-            }
-
-            // WRITE COUNTER TO FLASH
+            // Write counter to flash
             write_counter_to_flash(counter);
-            unsafe {
-                BUTTON_PIN
-                    .as_mut()
-                    .unwrap()
-                    .set_interrupt_enabled(EdgeLow, true);
-            }
+
+            // Clear LED grid
             let _ = ws.write(blank);
 
+            //
             loop {
                 cortex_m::asm::wfi();
 
                 let awoken_by_button = free(|cs| BUTTON_PRESSED.borrow(cs).replace(false));
 
+                // Wake up, increment, display, and reset activity timer
                 if awoken_by_button {
                     counter += 1;
 

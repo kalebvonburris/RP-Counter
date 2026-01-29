@@ -1,10 +1,20 @@
+//! # LED Logic
+//!
+//! This module contains logic for converting numbers into pixel data
+//! and mapping that data to a zig-zag wired 8x32 LED panel.
+
 use smart_leds::RGB8;
 
+/// The height of each strip of LEDs.
 pub const HEIGHT: usize = 8;
+/// The width/column count of the LED panel.
 pub const WIDTH: usize = 32;
-const BRIGHTNESS: u8 = 3;
+/// Output RGB brightness value.
+/// This can be a lot higher if a resistor is applied
+/// between the LED strip VCC and battery/ground.
+const BRIGHTNESS: u8 = 10;
 
-/// 4x4 bitmap font for digits 0-9
+/// 4x4 bitmap font for digits `0`-`9`.
 pub const DIGITS: &[&[u8; 8]] = &[
     &[
         0b0110, 0b1001, 0b1001, 0b1001, 0b1001, 0b1001, 0b1001, 0b0110,
@@ -38,9 +48,12 @@ pub const DIGITS: &[&[u8; 8]] = &[
     ], // 9
 ];
 
+/// Takes a given `u64` number (0-999,999) and coverts it into an array of RGB8 pixel values.
+/// At the moment it defaults to red digits on a blank background.
 pub fn num_to_pixels(mut num: u64) -> [RGB8; WIDTH * HEIGHT] {
     let mut values = [RGB8::default(); WIDTH * HEIGHT];
     let mut index = 11;
+
     while num != 0 {
         let digit = (num % 10) as usize;
         num /= 10;
@@ -72,6 +85,23 @@ pub fn num_to_pixels(mut num: u64) -> [RGB8; WIDTH * HEIGHT] {
     values
 }
 
+/// The LED array is an 8x32 grid, but is wired like this:
+/// S = Start, E = End
+/// ```
+/// =============================
+/// S  -> ...32 total columns...V
+/// |  ^                        |
+/// V  |                        V
+/// |  |                        |
+/// V  ^                        V
+/// |  |                        |
+/// V  ^                        V
+/// -> |                        E
+/// =============================
+/// ```
+///
+/// So  we start at S, encode the positions in a zig-zag manner down, then over, then up,
+/// then over, etc.
 pub fn logical_array_to_zig_zag(arr: [RGB8; WIDTH * HEIGHT]) -> [RGB8; WIDTH * HEIGHT] {
     let mut output = [RGB8::default(); WIDTH * HEIGHT];
 
@@ -79,7 +109,7 @@ pub fn logical_array_to_zig_zag(arr: [RGB8; WIDTH * HEIGHT]) -> [RGB8; WIDTH * H
         let col = pos % WIDTH; // Column (strip number)
         let row = pos / WIDTH; // Row within that column
 
-        let pixel_index = if col % 2 == 0 {
+        let pixel_index = if col.is_multiple_of(2) {
             // Even columns: normal order (top to bottom)
             col * HEIGHT + row
         } else {
